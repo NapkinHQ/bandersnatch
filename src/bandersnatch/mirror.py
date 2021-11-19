@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import time
+import boto3
 from json import dump
 from pathlib import Path, WindowsPath
 from threading import RLock
@@ -26,6 +27,24 @@ from .storage import storage_backend_plugins
 
 LOG_PLUGINS = True
 logger = logging.getLogger(__name__)
+
+# napkin dynamo db
+DYNAMODB = 'dynamodb'
+DEFAULT_REGION = 'us-east-2'
+class DB:
+    def __init__(self, env: str = 'dev', region: str = DEFAULT_REGION):
+        self.env = env
+        self.client = boto3.resource(DYNAMODB, region_name=region)
+
+    def _table(self, tablename):
+        return self.client.Table(f"{tablename}-{self.env}")
+
+    @property
+    def pypi(self):
+        return self._table("pypi-mirror-packages")
+
+
+db = DB()
 
 
 class Mirror:
@@ -691,10 +710,36 @@ class BandersnatchMirror(Mirror):
         """Purge + download files returning files removed + added"""
         downloaded_files = set()
         deferred_exception = None
-        for release_file in package.release_files:
+
+        try:
+            version = list(package.releases.keys())[0]
+        except IndexError:
+            version = None
+        valid_versions = {
+            "py3",
+            "py35",
+            "py36",
+            "py37",
+            "py38",
+            "cp35",
+            "cp36",
+            "cp37",
+            "cp38",
+            "source"
+        }
+
+        release_files = list(filter(
+            lambda x: x['python_version'] in valid_versions, package.release_files
+        ))
+
+        for release_file in release_files:
+
             release_path, download_urls = self.populate_download_urls(release_file)
+
             for cnt, url in enumerate(download_urls):
+
                 try:
+
                     downloaded_file = await self.download_file(
                         url,
                         release_file["size"],
@@ -704,6 +749,8 @@ class BandersnatchMirror(Mirror):
                         release_file["digests"]["sha256"],
                         urlpath=release_path,
                     )
+
+
                     if downloaded_file:
                         downloaded_files.add(
                             str(downloaded_file.relative_to(self.homedir))
@@ -727,6 +774,18 @@ class BandersnatchMirror(Mirror):
                         deferred_exception = e
         if deferred_exception:
             raise deferred_exception  # raise the exception after trying all files
+
+        if len(package.release_files) > 0:
+
+            db.pypi.put_item(Item={
+                "distribution": package.raw_name,
+                "version": version,
+                "name": package.name,
+                "downloaded_at": datetime.datetime.utcnow().strftime(
+                    '%Y-%m-%dT%H:%M:%SZ'),
+                "installed_at": None,
+                "top_levels": []
+            })
 
         self.altered_packages[package.name] = downloaded_files
 
@@ -967,6 +1026,7 @@ class BandersnatchMirror(Mirror):
 
         # set upload time to avoid downloading again in next sync
         self.storage_backend.set_upload_time(path, upload_time)
+
         return path
 
 
