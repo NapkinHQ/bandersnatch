@@ -169,7 +169,7 @@ async def async_main(args: argparse.Namespace, config: ConfigParser) -> int:
 
             try:
                 import boto3
-                s3 = boto3.resource('s3')
+                s3 = boto3.resource('s3', region='us-east-2')
                 bucket = config.get("mirror", "directory")[1:]
                 tmp_status_file = f"{bucket}/status.backup"
                 s3.Object(bucket, "status.backup").copy_from(
