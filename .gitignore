@@ -109,3 +109,5 @@ monkeytype.sqlite3
 
 # Integration test
 mirrored-files
+accept_list.csv
+bandersnatch.backup.conf

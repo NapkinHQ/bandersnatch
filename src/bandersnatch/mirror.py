@@ -13,6 +13,7 @@ from pathlib import Path, WindowsPath
 from threading import RLock
 from typing import Any, Awaitable, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import unquote, urlparse
+from numbers import Number
 
 from filelock import Timeout
 from packaging.utils import canonicalize_name
@@ -45,6 +46,27 @@ class DB:
 
 
 db = DB()
+
+sqs = boto3.resource('sqs')
+queue = sqs.get_queue_by_name(QueueName='pypi-queue-dev')
+
+
+def sqs_message_attrs(**kwargs):
+    attrs = {}
+    for k, v in kwargs.items():
+        if isinstance(v, str):
+            attrs[k] = {
+                'StringValue': str(v),
+                'DataType': 'String'
+            }
+        elif isinstance(v, Number):
+            attrs[k] = {
+                'StringValue': str(v),
+                'DataType': 'Number'
+            }
+
+    return attrs
+
 
 
 class Mirror:
@@ -776,16 +798,27 @@ class BandersnatchMirror(Mirror):
             raise deferred_exception  # raise the exception after trying all files
 
         if len(package.release_files) > 0:
+            #
+            # db.pypi.put_item(Item={
+            #     "distribution": package.raw_name,
+            #     "version": version,
+            #     "name": package.name,
+            #     "downloaded_at": datetime.datetime.utcnow().strftime(
+            #         '%Y-%m-%dT%H:%M:%SZ'),
+            #     "installed_at": None,
+            #     "top_levels": []
+            # })
 
-            db.pypi.put_item(Item={
-                "distribution": package.raw_name,
-                "version": version,
-                "name": package.name,
-                "downloaded_at": datetime.datetime.utcnow().strftime(
-                    '%Y-%m-%dT%H:%M:%SZ'),
-                "installed_at": None,
-                "top_levels": []
-            })
+            print('SENDING SQS MESSAGE')
+            res = queue.send_message(MessageBody='PyPiDownload',
+                               MessageAttributes=sqs_message_attrs(
+                                   raw_name=package.raw_name,
+                                   version=version,
+                                   name=package.name,
+                                   downloaded_at=datetime.datetime.utcnow().strftime(
+                                       '%Y-%m-%dT%H:%M:%SZ')
+                               ))
+            print(res)
 
         self.altered_packages[package.name] = downloaded_files
 
