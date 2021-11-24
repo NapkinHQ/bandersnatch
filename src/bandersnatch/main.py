@@ -160,13 +160,21 @@ async def async_main(args: argparse.Namespace, config: ConfigParser) -> int:
 
     if args.force_check:
         storage_plugin = next(iter(storage_backend_plugins()))
+
         status_file = (
             storage_plugin.PATH_BACKEND(config.get("mirror", "directory")) / "status"
         )
+
         if status_file.exists():
-            tmp_status_file = Path(gettempdir()) / "status"
+
             try:
-                shutil.move(str(status_file), tmp_status_file)
+                import boto3
+                s3 = boto3.resource('s3')
+                bucket = config.get("mirror", "directory")[1:]
+                tmp_status_file = f"{bucket}/status.backup"
+                s3.Object(bucket, "status.backup").copy_from(
+                    CopySource=f"{bucket}/status")
+                s3.Object(bucket, 'status').delete()
                 logger.debug(
                     "Force bandersnatch to check everything against the master PyPI"
                     + f" - status file moved to {tmp_status_file}"

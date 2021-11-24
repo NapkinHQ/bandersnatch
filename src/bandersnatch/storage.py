@@ -374,7 +374,7 @@ def load_storage_plugins(
 
 
 def storage_backend_plugins(
-    backend: Optional[str] = "filesystem",
+    backend: Optional[str] = "s3",
     config: Optional[configparser.ConfigParser] = None,
     clear_cache: bool = False,
 ) -> Iterable[Storage]:
