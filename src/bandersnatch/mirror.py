@@ -733,10 +733,7 @@ class BandersnatchMirror(Mirror):
         downloaded_files = set()
         deferred_exception = None
 
-        try:
-            version = list(package.releases.keys())[0]
-        except IndexError:
-            version = None
+
         valid_versions = {
             "py3",
             "py35",
@@ -750,75 +747,70 @@ class BandersnatchMirror(Mirror):
             "source"
         }
 
-        release_files = list(filter(
-            lambda x: x['python_version'] in valid_versions, package.release_files
-        ))
+        print(package.releases)
 
-        for release_file in release_files:
+        for version, release_files in package.releases.items():
 
-            release_path, download_urls = self.populate_download_urls(release_file)
+            for release_file in release_files:
+                if release_file['python_version'] not in valid_versions:
+                    continue
 
-            for cnt, url in enumerate(download_urls):
+                release_path, download_urls = self.populate_download_urls(
+                    release_file)
 
-                try:
+                for cnt, url in enumerate(download_urls):
 
-                    downloaded_file = await self.download_file(
-                        url,
-                        release_file["size"],
-                        datetime.datetime.fromisoformat(
-                            release_file["upload_time_iso_8601"].replace("Z", "+00:00")
-                        ),
-                        release_file["digests"]["sha256"],
-                        urlpath=release_path,
-                    )
-
-
-                    if downloaded_file:
-                        downloaded_files.add(
-                            str(downloaded_file.relative_to(self.homedir))
+                    try:
+                        downloaded_file = await self.download_file(
+                            url,
+                            release_file["size"],
+                            datetime.datetime.fromisoformat(
+                                release_file["upload_time_iso_8601"].replace(
+                                    "Z", "+00:00")
+                            ),
+                            release_file["digests"]["sha256"],
+                            urlpath=release_path,
                         )
-                        break
-                except Exception as e:
-                    # Avoid flooding log messages with exception traceback
-                    if not len(download_urls) == (cnt + 1):
-                        logger.info(
-                            "Continuing to next candidate URL after error downloading: "
-                            f"{url}"
-                        )
-                    # Log an ERROR entry with traceback for the last URL entry in list,
-                    # suggesting the final attemp of retriving the file has failed
-                    else:
-                        logger.exception(
-                            "Continuing to next file after error downloading: " f"{url}"
-                        )
-                    # keep previous exception, also ignore non-default urls
-                    if not deferred_exception and len(download_urls) == (cnt + 1):
-                        deferred_exception = e
-        if deferred_exception:
-            raise deferred_exception  # raise the exception after trying all files
 
-        if len(package.release_files) > 0:
-            #
-            # db.pypi.put_item(Item={
-            #     "distribution": package.raw_name,
-            #     "version": version,
-            #     "name": package.name,
-            #     "downloaded_at": datetime.datetime.utcnow().strftime(
-            #         '%Y-%m-%dT%H:%M:%SZ'),
-            #     "installed_at": None,
-            #     "top_levels": []
-            # })
+                        if downloaded_file:
+                            downloaded_files.add(
+                                str(downloaded_file.relative_to(self.homedir))
+                            )
+                            break
+                    except Exception as e:
+                        # Avoid flooding log messages with exception traceback
+                        if not len(download_urls) == (cnt + 1):
+                            logger.info(
+                                "Continuing to next candidate URL after error downloading: "
+                                f"{url}"
+                            )
+                        # Log an ERROR entry with traceback for the last URL entry in list,
+                        # suggesting the final attemp of retriving the file has failed
+                        else:
+                            logger.exception(
+                                "Continuing to next file after error downloading: " f"{url}"
+                            )
+                        # keep previous exception, also ignore non-default urls
+                        if not deferred_exception and len(download_urls) == (
+                            cnt + 1):
+                            deferred_exception = e
 
             print('SENDING SQS MESSAGE')
             res = queue.send_message(MessageBody='PyPiDownload',
-                               MessageAttributes=sqs_message_attrs(
-                                   raw_name=package.raw_name,
-                                   version=version,
-                                   name=package.name,
-                                   downloaded_at=datetime.datetime.utcnow().strftime(
-                                       '%Y-%m-%dT%H:%M:%SZ')
-                               ))
+                                     MessageAttributes=sqs_message_attrs(
+                                         raw_name=package.raw_name,
+                                         version=version,
+                                         name=package.name,
+                                         downloaded_at=datetime.datetime.utcnow().strftime(
+                                             '%Y-%m-%dT%H:%M:%SZ')
+                                     ))
             print(res)
+
+        if deferred_exception:
+            raise deferred_exception  # raise the exception after trying all files
+
+
+
 
         self.altered_packages[package.name] = downloaded_files
 

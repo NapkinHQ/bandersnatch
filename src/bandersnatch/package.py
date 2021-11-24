@@ -48,6 +48,14 @@ class Package:
 
         return release_files
 
+    def release_versions_and_files(self) -> List:
+        release_files: List[tuple] = []
+
+        for version, release in self.releases.items():
+            release_files.extend([(version, r) for r in release])
+
+        return release_files
+
     async def update_metadata(self, master: "Master", attempts: int = 3) -> None:
         tries = 0
         sleep_on_stale = 1
