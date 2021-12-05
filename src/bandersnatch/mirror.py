@@ -363,9 +363,8 @@ class BandersnatchMirror(Mirror):
         package.filter_all_releases_files(self.filters.filter_release_file_plugins())
         package.filter_all_releases(self.filters.filter_release_plugins())
 
-        if self.release_files_save:
-            await self.sync_release_files(package)
 
+        self.altered_packages[package.name] = set()
         await loop.run_in_executor(
             self.storage_backend.executor, self.sync_simple_page, package
         )
@@ -378,6 +377,9 @@ class BandersnatchMirror(Mirror):
 
         # Cleanup old legacy non PEP 503 Directories created for the Simple API
         await self.cleanup_non_pep_503_paths(package)
+
+        if self.release_files_save:
+            await self.sync_release_files(package)
 
     def finalize_sync(self) -> None:
         self.sync_index_page()
@@ -747,53 +749,51 @@ class BandersnatchMirror(Mirror):
             "source"
         }
 
-        print(package.releases)
-
         for version, release_files in package.releases.items():
 
-            for release_file in release_files:
-                if release_file['python_version'] not in valid_versions:
-                    continue
-
-                release_path, download_urls = self.populate_download_urls(
-                    release_file)
-
-                for cnt, url in enumerate(download_urls):
-
-                    try:
-                        downloaded_file = await self.download_file(
-                            url,
-                            release_file["size"],
-                            datetime.datetime.fromisoformat(
-                                release_file["upload_time_iso_8601"].replace(
-                                    "Z", "+00:00")
-                            ),
-                            release_file["digests"]["sha256"],
-                            urlpath=release_path,
-                        )
-
-                        if downloaded_file:
-                            downloaded_files.add(
-                                str(downloaded_file.relative_to(self.homedir))
-                            )
-                            break
-                    except Exception as e:
-                        # Avoid flooding log messages with exception traceback
-                        if not len(download_urls) == (cnt + 1):
-                            logger.info(
-                                "Continuing to next candidate URL after error downloading: "
-                                f"{url}"
-                            )
-                        # Log an ERROR entry with traceback for the last URL entry in list,
-                        # suggesting the final attemp of retriving the file has failed
-                        else:
-                            logger.exception(
-                                "Continuing to next file after error downloading: " f"{url}"
-                            )
-                        # keep previous exception, also ignore non-default urls
-                        if not deferred_exception and len(download_urls) == (
-                            cnt + 1):
-                            deferred_exception = e
+            # for release_file in release_files:
+            #     if release_file['python_version'] not in valid_versions:
+            #         continue
+            #
+            #     release_path, download_urls = self.populate_download_urls(
+            #         release_file)
+            #
+            #     for cnt, url in enumerate(download_urls):
+            #
+            #         try:
+            #             downloaded_file = await self.download_file(
+            #                 url,
+            #                 release_file["size"],
+            #                 datetime.datetime.fromisoformat(
+            #                     release_file["upload_time_iso_8601"].replace(
+            #                         "Z", "+00:00")
+            #                 ),
+            #                 release_file["digests"]["sha256"],
+            #                 urlpath=release_path,
+            #             )
+            #
+            #             if downloaded_file:
+            #                 downloaded_files.add(
+            #                     str(downloaded_file.relative_to(self.homedir))
+            #                 )
+            #                 break
+            #         except Exception as e:
+            #             # Avoid flooding log messages with exception traceback
+            #             if not len(download_urls) == (cnt + 1):
+            #                 logger.info(
+            #                     "Continuing to next candidate URL after error downloading: "
+            #                     f"{url}"
+            #                 )
+            #             # Log an ERROR entry with traceback for the last URL entry in list,
+            #             # suggesting the final attemp of retriving the file has failed
+            #             else:
+            #                 logger.exception(
+            #                     "Continuing to next file after error downloading: " f"{url}"
+            #                 )
+            #             # keep previous exception, also ignore non-default urls
+            #             if not deferred_exception and len(download_urls) == (
+            #                 cnt + 1):
+            #                 deferred_exception = e
 
             print('SENDING SQS MESSAGE')
             res = queue.send_message(MessageBody='PyPiDownload',
