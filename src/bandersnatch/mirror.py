@@ -7,6 +7,8 @@ import logging
 import os
 import sys
 import time
+import traceback
+import json
 import boto3
 from json import dump
 from pathlib import Path, WindowsPath
@@ -48,7 +50,9 @@ class DB:
 db = DB()
 
 sqs = boto3.resource('sqs')
-queue = sqs.get_queue_by_name(QueueName='pypi-queue-dev')
+queue_name = 'pypi-queue-prod'
+queue = sqs.get_queue_by_name(QueueName=queue_name)
+logger.info(f"Publishing messages to queue: {queue_name}")
 
 
 def sqs_message_attrs(**kwargs):
@@ -102,6 +106,7 @@ class Mirror:
 
         if specific_packages is None:
             # Changelog-based synchronization
+            logger.info("DETERMINING PACKAGES TO SYNC")
             await self.determine_packages_to_sync()
         else:
             # Synchronize specific packages. This method doesn't update the statusfile
@@ -125,6 +130,52 @@ class Mirror:
         self.finalize_sync()
         return self.altered_packages
 
+    def _dynamo_db_filter(self):
+        # pull all entries from dynamo db
+        # return Filter with dictionary of name-to-latest-serial
+        # if serial not present, use default of 13002800 (February 2022)
+
+        def scan(table, max_counter=None, **kwargs):
+            items = []
+            result = table.scan(**kwargs)
+
+            counter = 1
+            while 'LastEvaluatedKey' in result and (max_counter is None or counter < max_counter):
+                counter += 1
+                print(f"scan:{counter}")
+                items.extend(result["Items"])
+
+                result = table.scan(ExclusiveStartKey=result['LastEvaluatedKey'],
+                                    **kwargs)
+
+            items.extend(result["Items"])
+
+            return items
+
+        client = boto3.resource('dynamodb', region_name='us-east-2')
+        table = client.Table(f"pypi-mirror-packages-prod")
+        logger.info("Building dynamodb filter plugin")
+        entries = scan(table, max_counter=1)
+        logger.info("Done.")
+        # default_serial = 13002800
+        default_serial = 12637265
+        max_serials = {}
+
+        for entry in entries:
+            entry_serial = entry.get('last_serial', default_serial)
+            dist = entry['distribution']
+            max_serials[dist] = max(entry_serial, max_serials.get(dist, 0))
+
+        class DynamoDBFilterPlugin:
+            def __init__(self, whitelist):
+                self.whitelist = whitelist
+
+            def filter(self, metadata: dict):
+                package_name = metadata['info']['name']
+                return package_name in self.whitelist
+
+        return DynamoDBFilterPlugin(max_serials)
+
     def _filter_packages(self) -> None:
         """
         Run the package filtering plugins and remove any packages from the
@@ -133,7 +184,9 @@ class Mirror:
         """
         global LOG_PLUGINS
 
-        filter_plugins = self.filters.filter_project_plugins()
+        filter_plugins = self.filters.filter_project_plugins() + [self._dynamo_db_filter()]
+        logger.info("FILTERS")
+        logger.info(filter_plugins)
         if not filter_plugins:
             if LOG_PLUGINS:
                 logger.info("No project filters are enabled. Skipping filtering")
@@ -308,23 +361,27 @@ class BandersnatchMirror(Mirror):
         logger.info(f"Current mirror serial: {self.synced_serial}")
         self.need_wrapup = True
 
-        if self.storage_backend.exists(self.todolist):
-            # We started a sync previously and left a todo list as well as the
-            # targetted serial. We'll try to keep going through the todo list
-            # and then mark the targetted serial as done
-            logger.info("Resuming interrupted sync from local todo list.")
-            with self.storage_backend.open_file(self.todolist, text=True) as fh:
-                saved_todo = iter(fh)
-                self.target_serial = int(next(saved_todo).strip())
-                for line in saved_todo:
-                    package, serial = line.strip().split()
-                    self.packages_to_sync[package] = int(serial)
-        elif not self.synced_serial:
+        # if self.storage_backend.exists(self.todolist):
+        #     # We started a sync previously and left a todo list as well as the
+        #     # targetted serial. We'll try to keep going through the todo list
+        #     # and then mark the targetted serial as done
+        #     logger.info("Resuming interrupted sync from local todo list.")
+        #     with self.storage_backend.open_file(self.todolist, text=True) as fh:
+        #         saved_todo = iter(fh)
+        #         self.target_serial = int(next(saved_todo).strip())
+        #         for line in saved_todo:
+        #             package, serial = line.strip().split()
+        #             self.packages_to_sync[package] = int(serial)
+        if not self.synced_serial:
             logger.info("Syncing all packages.")
             # First get the current serial, then start to sync. This makes us
             # more defensive in case something changes on the server between
             # those two calls.
             all_packages = await self.master.all_packages()
+            logger.info("Writing all_packages.json")
+            with open("all_packages.json", 'w') as f:
+                f.write(json.dumps(all_packages))
+            logger.info(f"ALL_PACKES={len(all_packages)}")
             self.packages_to_sync.update(all_packages)
             self.target_serial = self.find_target_serial()
         else:
@@ -336,12 +393,17 @@ class BandersnatchMirror(Mirror):
             # anything todo at all during a changelog-based sync.
             self.need_index_sync = bool(self.packages_to_sync)
 
+        logger.info(f"Target serial: { self.find_target_serial()}")
         self._filter_packages()
+        logger.info("FILTERED PACKAGES")
+        print(json.dumps(self.packages_to_sync))
         logger.info(f"Trying to reach serial: {self.target_serial}")
         pkg_count = len(self.packages_to_sync)
         logger.info(f"{pkg_count} packages to sync.")
 
     async def process_package(self, package: Package) -> None:
+        print("processing package")
+        print(package)
         loop = asyncio.get_running_loop()
         # Don't save anything if our metadata filters all fail.
         if not package.filter_metadata(self.filters.filter_metadata_plugins()):
@@ -379,7 +441,10 @@ class BandersnatchMirror(Mirror):
         await self.cleanup_non_pep_503_paths(package)
 
         if self.release_files_save:
+            logger.info("SYNCING RELEASE FILES")
             await self.sync_release_files(package)
+        else:
+            logger.info("RELEASE_FILE_SAVE DISABLED")
 
     def finalize_sync(self) -> None:
         self.sync_index_page()
@@ -735,21 +800,68 @@ class BandersnatchMirror(Mirror):
         downloaded_files = set()
         deferred_exception = None
 
+        """
+        Keep the 6 latest releases, and then the latest 2 patches of every minor version
+        """
+        from packaging.specifiers import Version
 
-        valid_versions = {
-            "py3",
-            "py35",
-            "py36",
-            "py37",
-            "py38",
-            "cp35",
-            "cp36",
-            "cp37",
-            "cp38",
-            "source"
-        }
+        max_allowed = 50
+        latest_major_limit = 6
+        versions = {}
 
-        for version, release_files in package.releases.items():
+        patches_per_minor = 2
+
+        logger.info(f"Package releases: {len(package.releases)}")
+
+        versions_sorted = [(version,release_files) for (version, release_files) in package.releases.items()]
+        versions_sorted = sorted(versions_sorted, key=lambda a: a[0], reverse=True)
+        allowed = []
+
+        def add_to_versions(ma, mi, pa):
+            if ma not in versions:
+                versions[ma] = {
+                    mi: [pa]
+                }
+            else:
+                m = versions[ma]
+                if mi in m:
+                    ps = m[mi]
+
+                    if len(ps) < patches_per_minor:
+                        ps.append(pa)
+                else:
+                    m[mi] = [pa]
+
+        def can_add(ma, mi, pa):
+            return len(versions.get(ma, {}).get(mi, [])) < patches_per_minor
+
+        try:
+            for i, (version, release_files) in enumerate(versions_sorted):
+
+                if i > max_allowed:
+                    logger.info(f"REACHED MAX_ALLOWED FOR {package.raw_name}. SKIPPING REST")
+                    break
+
+                v = Version(version)
+                major = str(v.major)
+                minor = str(v.minor)
+                patch = str(v.micro)
+
+                if i < latest_major_limit or can_add(major, minor, patch):
+                    allowed.append((version, release_files))
+                    add_to_versions(major, minor, patch)
+                else:
+                    print(f"Not allowed: {v}")
+
+        except Exception as e:
+            logger.info("ERROR")
+            logger.info(e)
+            logger.info(traceback.format_exc())
+
+        for version, release_files in allowed:
+
+
+            print(f"VERSION: {version}")
 
             # for release_file in release_files:
             #     if release_file['python_version'] not in valid_versions:
@@ -796,21 +908,20 @@ class BandersnatchMirror(Mirror):
             #                 deferred_exception = e
 
             print('SENDING SQS MESSAGE')
-            res = queue.send_message(MessageBody='PyPiDownload',
-                                     MessageAttributes=sqs_message_attrs(
+            msg_attrs = sqs_message_attrs(
                                          raw_name=package.raw_name,
+                                         serial=package.serial,
                                          version=version,
                                          name=package.name,
                                          downloaded_at=datetime.datetime.utcnow().strftime(
                                              '%Y-%m-%dT%H:%M:%SZ')
-                                     ))
+                                     )
+            print(msg_attrs)
+            res = queue.send_message(MessageBody='PyPiDownload', MessageAttributes=msg_attrs)
             print(res)
 
         if deferred_exception:
             raise deferred_exception  # raise the exception after trying all files
-
-
-
 
         self.altered_packages[package.name] = downloaded_files
 

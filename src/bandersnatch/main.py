@@ -165,6 +165,9 @@ async def async_main(args: argparse.Namespace, config: ConfigParser) -> int:
             storage_plugin.PATH_BACKEND(config.get("mirror", "directory")) / "status"
         )
 
+        logger.info("WHAT")
+        logger.debug("DEBUG")
+
         if status_file.exists():
 
             try:
